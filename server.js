@@ -96,6 +96,34 @@ app.post('/send-message', async (req, res) => {
     }
 });
 
+app.get('/', (req, res) => {
+    res.send(`
+        <html>
+            <head>
+                <title>WhatsApp Gateway</title>
+                <style>
+                    body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f4f7f6; color: #333; }
+                    h1 { color: #25d366; margin-bottom: 10px; }
+                    .card { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); display: inline-block; max-width: 500px; }
+                    p { font-size: 16px; line-height: 1.6; }
+                    .status { font-weight: bold; color: #25d366; }
+                </style>
+            </head>
+            <body>
+                <div class="card">
+                    <h1>🟢 WhatsApp Gateway Active</h1>
+                    <p>Status Layanan: <span class="status">Berhasil Dijalankan 🚀</span></p>
+                    <p>Silakan buka tab <b>Logs</b> di dashboard Render Anda untuk memindai QR Code WhatsApp.</p>
+                </div>
+            </body>
+        </html>
+    `);
+});
+
+app.get('/healthz', (req, res) => {
+    res.json({ status: 'ok', client: client.info ? 'connected' : 'disconnected' });
+});
+
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', client: client.info ? 'connected' : 'disconnected' });
 });
