@@ -26,7 +26,14 @@ const client = new Client({
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu',
-            '--no-zygote'
+            '--no-zygote',
+            '--disable-extensions',
+            '--mute-audio',
+            '--no-first-run',
+            '--disable-background-networking',
+            '--disable-default-apps',
+            '--disable-sync',
+            '--blink-settings=imagesEnabled=false' // Mematikan loading gambar untuk menghemat RAM
         ],
         executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome-stable'
     }
