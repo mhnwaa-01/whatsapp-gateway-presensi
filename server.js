@@ -1,6 +1,7 @@
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestWaWebVersion } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, fetchLatestWaWebVersion, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
 const qrcode = require('qrcode');
+const pino = require('pino'); // Tambahkan pino untuk mengatur log
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,12 +20,15 @@ async function connectToWhatsApp() {
     console.log(`Menggunakan WA Web versi v${version.join('.')}, isLatest: ${isLatest}`);
 
     const sock = makeWASocket({
-        version, // <-- WAJIB: Masukkan versi terbaru ke konfigurasi socket
+        version,
         auth: state,
         browser: ['Mac OS', 'Desktop', '3.0'], 
-        printQRInTerminal: true 
+        printQRInTerminal: true,
+        // Gunakan logger silent agar terminal tidak dibanjiri log sinkronisasi
+        logger: pino({ level: 'silent' }) 
     });
 
+    // EVENT: KONEKSI UPDATE (QR & Status)
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
@@ -39,11 +43,23 @@ async function connectToWhatsApp() {
         }
 
         if (connection === 'close') {
-            connectionStatus = 'Koneksi terputus. Mencoba menghubungkan kembali...';
             qrCodeImage = ''; 
-            console.log(connectionStatus);
-            // Panggil ulang fungsi untuk reconnect
-            connectToWhatsApp();
+            
+            // Cek apakah alasan disconnect karena logout (sesi tidak valid)
+            const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            
+            console.log('Koneksi terputus. Alasan:', lastDisconnect.error?.message);
+            
+            if (shouldReconnect) {
+                connectionStatus = 'Koneksi terputus. Mencoba menghubungkan kembali...';
+                console.log(connectionStatus);
+                connectToWhatsApp(); // Reconnect otomatis
+            } else {
+                connectionStatus = 'Sesi Invalid / Logout. Silakan hapus folder auth_info_baileys dan scan ulang.';
+                console.log(connectionStatus);
+                // Jika masuk ke sini, JANGAN panggil connectToWhatsApp(). 
+                // Kamu harus hapus folder auth secara manual.
+            }
         } else if (connection === 'open') {
             connectionStatus = '✅ Terhubung! Bot WhatsApp siap digunakan.';
             qrCodeImage = ''; 
@@ -51,7 +67,38 @@ async function connectToWhatsApp() {
         }
     });
 
+    // EVENT: UPDATE KREDENSIAL
     sock.ev.on('creds.update', saveCreds);
+
+    // EVENT: PESAN MASUK (Ini yang sebelumnya kurang!)
+    sock.ev.on('messages.upsert', async (m) => {
+        const msg = m.messages[0];
+        
+        // Abaikan pesan dari bot itu sendiri atau pesan kosong
+        if (!msg.message || msg.key.fromMe) return;
+
+        // Ambil isi teks dari pesan
+        const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+        const sender = msg.key.remoteJid;
+
+        console.log(`Pesan masuk dari ${sender}: ${text}`);
+
+        // Routing perintah dasar
+        switch (text.toLowerCase()) {
+            case 'halo':
+                await sock.sendMessage(sender, { text: 'Halo! Ada yang bisa bot bantu?' });
+                break;
+            case '/izin':
+                await sock.sendMessage(sender, { text: 'Silakan kirimkan format izin:\nNama: \nKelas: \nAlasan:' });
+                break;
+            case '/sakit':
+                await sock.sendMessage(sender, { text: 'Silakan kirimkan format sakit dan lampirkan foto surat dokter jika ada.' });
+                break;
+            case '/rekap':
+                await sock.sendMessage(sender, { text: 'Fitur rekap sedang dalam pengembangan.' });
+                break;
+        }
+    });
 }
 
 // ========================================================
