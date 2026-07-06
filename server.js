@@ -1,7 +1,8 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const pino = require('pino');
 const express = require('express');
 const axios = require('axios');
+const fs = require('fs');
 
 const app = express();
 app.use(express.json());
@@ -11,83 +12,88 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_URL = process.env.WEBHOOK_URL; // Laravel webhook url
 const API_KEY = process.env.API_KEY || 'default-secret-key'; // security key
 
-let latestQr = null;
+let sock = null;
+let qrCodeData = null;
+let connectionStatus = 'DISCONNECTED';
 
-const client = new Client({
-    authStrategy: new LocalAuth(),
-    webVersionCache: {
-        type: 'remote',
-        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
-    },
-    puppeteer: {
-        headless: true,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--no-zygote',
-            '--disable-extensions',
-            '--mute-audio',
-            '--no-first-run',
-            '--disable-background-networking',
-            '--disable-default-apps',
-            '--disable-sync',
-            '--blink-settings=imagesEnabled=false' // Mematikan loading gambar untuk menghemat RAM
-        ],
-        executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome-stable'
-    }
-});
+async function connectToWhatsApp() {
+    // Session state directory
+    const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info');
 
-client.on('qr', (qr) => {
-    latestQr = qr;
-    console.log('Scan the QR code on the main web page (URL) to link your WhatsApp.');
-    qrcode.generate(qr, { small: true });
-});
+    // Create WhatsApp socket client
+    sock = makeWASocket({
+        auth: state,
+        logger: pino({ level: 'silent' }), // Disable verbose logs to prevent spam and save CPU
+        printQRInTerminal: true
+    });
 
-client.on('ready', () => {
-    latestQr = null;
-    console.log('WhatsApp Client is ready and connected!');
-});
+    // Save credentials when updated
+    sock.ev.on('creds.update', saveCreds);
 
-client.on('authenticated', () => {
-    latestQr = null;
-    console.log('WhatsApp Client authenticated!');
-});
+    // Monitor connection events
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect, qr } = update;
 
-client.on('disconnected', () => {
-    latestQr = null;
-    console.log('WhatsApp Client disconnected!');
-});
-
-// Handle incoming messages
-client.on('message', async (msg) => {
-    // Ignore group chats
-    if (msg.from.endsWith('@g.us')) return;
-
-    console.log(`Received message from ${msg.from}: ${msg.body}`);
-
-    if (WEBHOOK_URL) {
-        try {
-            // Forward payload in Fonnte format:
-            // sender: 62812...
-            // message: text
-            // device: our connected number
-            const sender = msg.from.replace('@c.us', '');
-            const device = client.info ? client.info.wid.user : '';
-
-            await axios.post(WEBHOOK_URL, {
-                sender: sender,
-                message: msg.body,
-                device: device
-            });
-        } catch (error) {
-            console.error('Failed to forward message to Laravel webhook:', error.message);
+        if (qr) {
+            qrCodeData = qr;
         }
-    }
-});
 
-// Endpoint to send message
+        if (connection === 'close') {
+            const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            console.log('WhatsApp connection closed. Reconnecting:', shouldReconnect, lastDisconnect.error);
+            connectionStatus = 'DISCONNECTED';
+            qrCodeData = null;
+            if (shouldReconnect) {
+                connectToWhatsApp();
+            }
+        } else if (connection === 'open') {
+            console.log('WhatsApp Client is ready and connected!');
+            connectionStatus = 'CONNECTED';
+            qrCodeData = null;
+        }
+    });
+
+    // Handle incoming messages
+    sock.ev.on('messages.upsert', async (m) => {
+        if (m.type !== 'notify') return;
+
+        for (const msg of m.messages) {
+            // Ignore messages sent by ourselves
+            if (msg.key.fromMe) continue;
+            
+            // Ignore group messages
+            if (msg.key.remoteJid.endsWith('@g.us')) continue;
+
+            const sender = msg.key.remoteJid.replace('@s.whatsapp.net', '');
+            const messageContent = msg.message?.conversation || 
+                                   msg.message?.extendedTextMessage?.text || 
+                                   '';
+
+            if (!messageContent) continue;
+
+            console.log(`Received message from ${sender}: ${messageContent}`);
+
+            if (WEBHOOK_URL) {
+                try {
+                    // Forward to Laravel webhook in Fonnte format:
+                    // sender: 62812...
+                    // message: text
+                    // device: bot's own number
+                    const botJid = sock.user && sock.user.id ? sock.user.id.split(':')[0] : '';
+                    await axios.post(WEBHOOK_URL, {
+                        sender: sender,
+                        message: messageContent,
+                        device: botJid
+                    });
+                } catch (error) {
+                    console.error('Failed to forward message to Laravel webhook:', error.message);
+                }
+            }
+        }
+    });
+}
+
+// Endpoint to send message (called by Laravel)
 app.post('/send-message', async (req, res) => {
     const authHeader = req.headers['authorization'];
     if (authHeader !== API_KEY) {
@@ -100,16 +106,20 @@ app.post('/send-message', async (req, res) => {
     }
 
     try {
-        // Format number to WhatsApp format (e.g. 0812... -> 62812...@c.us)
+        if (connectionStatus !== 'CONNECTED' || !sock) {
+            return res.status(503).json({ status: false, message: 'WhatsApp client is not connected' });
+        }
+
+        // Format target number (e.g. 0812... -> 62812...@s.whatsapp.net)
         let formattedNumber = target.replace(/[^0-9]/g, '');
         if (formattedNumber.startsWith('0')) {
             formattedNumber = '62' + formattedNumber.substr(1);
         }
-        if (!formattedNumber.endsWith('@c.us')) {
-            formattedNumber = formattedNumber + '@c.us';
+        if (!formattedNumber.endsWith('@s.whatsapp.net')) {
+            formattedNumber = formattedNumber + '@s.whatsapp.net';
         }
 
-        await client.sendMessage(formattedNumber, message);
+        await sock.sendMessage(formattedNumber, { text: message });
         console.log(`Sent message to ${formattedNumber}: ${message}`);
         res.json({ status: true, message: 'Message sent successfully' });
     } catch (error) {
@@ -118,10 +128,12 @@ app.post('/send-message', async (req, res) => {
     }
 });
 
+// Endpoint for frontend status check
 app.get('/qr-code-raw', (req, res) => {
-    res.json({ qr: latestQr, connected: !!client.info });
+    res.json({ qr: qrCodeData, connected: connectionStatus === 'CONNECTED' });
 });
 
+// Web interface
 app.get('/', (req, res) => {
     res.send(`
         <html>
@@ -141,7 +153,7 @@ app.get('/', (req, res) => {
             </head>
             <body>
                 <div class="card">
-                    <h1>🟢 WhatsApp Gateway</h1>
+                    <h1>🟢 WhatsApp Gateway (Baileys)</h1>
                     <div id="status-container" style="margin-bottom: 20px;">
                         Status: <span id="status-label" class="status loading">Memuat...</span>
                     </div>
@@ -193,7 +205,7 @@ app.get('/', (req, res) => {
                                         }
                                     } else {
                                         qrContainer.style.display = 'none';
-                                        document.getElementById('qrcode').innerHTML = '<p class="loading">Menunggu browser memuat WhatsApp Web...</p>';
+                                        document.getElementById('qrcode').innerHTML = '<p class="loading">Menunggu sistem membuat QR Code...</p>';
                                     }
                                 }
                             })
@@ -210,14 +222,14 @@ app.get('/', (req, res) => {
 });
 
 app.get('/healthz', (req, res) => {
-    res.json({ status: 'ok', client: client.info ? 'connected' : 'disconnected' });
+    res.json({ status: 'ok', connected: connectionStatus === 'CONNECTED' });
 });
 
 app.get('/health', (req, res) => {
-    res.json({ status: 'ok', client: client.info ? 'connected' : 'disconnected' });
+    res.json({ status: 'ok', connected: connectionStatus === 'CONNECTED' });
 });
 
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
-    client.initialize();
+    connectToWhatsApp();
 });
