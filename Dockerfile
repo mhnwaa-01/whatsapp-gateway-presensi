@@ -1,7 +1,8 @@
 FROM node:18-slim
 
 # Install git and ssh client for resolving git+ssh dependency URLs
-RUN apt-get update && apt-get install -y git openssh-client --no-install-recommends && rm -rf /var/lib/apt/lists/*
+# Install git, ssh client, and ca-certificates for resolving git+ssh dependency URLs securely
+RUN apt-get update && apt-get install -y git openssh-client ca-certificates --no-install-recommends && rm -rf /var/lib/apt/lists/*
 
 ENV HOME=/app
 
