@@ -1,39 +1,34 @@
 const { default: makeWASocket, useMultiFileAuthState, fetchLatestWaWebVersion, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
 const qrcode = require('qrcode');
-const pino = require('pino'); 
+const pino = require('pino');
+const axios = require('axios');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
+const PORT = process.env.PORT || 3000;
+const WEBHOOK_URL = process.env.WEBHOOK_URL; // Laravel webhook url
+const API_KEY = process.env.API_KEY || 'default-secret-key'; // security key
+
+let sock = null;
 let qrCodeImage = '';
 let connectionStatus = 'Menunggu inisialisasi WhatsApp...';
 
-// ========================================================
-// DATABASE SIMULASI (Ganti dengan kueri MySQL/MongoDB milikmu nanti)
-// ========================================================
-const databaseSiswa = {
-    // Kunci menggunakan format nomor WA internasional tanpa '+'
-    "6281776800015": { nama: "Siswa Penguji", kelas: "12 RPL 1" },
-    "6281234567890": { nama: "Budi Santoso", kelas: "11 TKJ 2" }
-};
-
-// ========================================================
-// 1. LOGIKA BOT WHATSAPP
-// ========================================================
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
-    // MENGAMBIL VERSI WHATSAPP WEB TERBARU 
+    // Mengambil versi WhatsApp Web terbaru
     const { version, isLatest } = await fetchLatestWaWebVersion();
     console.log(`Menggunakan WA Web versi v${version.join('.')}, isLatest: ${isLatest}`);
 
-    const sock = makeWASocket({
+    sock = makeWASocket({
         version,
         auth: state,
-        browser: ['Mac OS', 'Desktop', '3.0'], 
+        browser: ['Mac OS', 'Desktop', '3.0'],
         printQRInTerminal: true,
-        logger: pino({ level: 'silent' }) 
+        logger: pino({ level: 'silent' })
     });
 
     // EVENT: KONEKSI UPDATE (QR & Status)
@@ -51,21 +46,21 @@ async function connectToWhatsApp() {
         }
 
         if (connection === 'close') {
-            qrCodeImage = ''; 
+            qrCodeImage = '';
             const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
             console.log('Koneksi terputus. Alasan:', lastDisconnect.error?.message);
-            
+
             if (shouldReconnect) {
                 connectionStatus = 'Koneksi terputus. Mencoba menghubungkan kembali...';
                 console.log(connectionStatus);
-                connectToWhatsApp(); 
+                connectToWhatsApp();
             } else {
                 connectionStatus = 'Sesi Invalid / Logout. Silakan hapus folder auth_info_baileys dan scan ulang.';
                 console.log(connectionStatus);
             }
         } else if (connection === 'open') {
             connectionStatus = '✅ Terhubung! Bot WhatsApp siap digunakan.';
-            qrCodeImage = ''; 
+            qrCodeImage = '';
             console.log(connectionStatus);
         }
     });
@@ -73,89 +68,119 @@ async function connectToWhatsApp() {
     // EVENT: UPDATE KREDENSIAL
     sock.ev.on('creds.update', saveCreds);
 
-    // EVENT: PESAN MASUK (Sudah di-update dengan logika pengenalan nomor HP)
+    // EVENT: PESAN MASUK (Meneruskan ke Webhook Laravel)
     sock.ev.on('messages.upsert', async (m) => {
-        const msg = m.messages[0];
-        
-        if (!msg.message || msg.key.fromMe) return;
+        if (m.type !== 'notify') return;
 
-        const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
-        const senderJid = msg.key.remoteJid; 
-        
-        // Ekstrak hanya nomor HP tanpa '@s.whatsapp.net'
-        const senderNumber = senderJid.split('@')[0]; 
+        for (const msg of m.messages) {
+            // Abaikan jika pesan dikirim oleh bot sendiri
+            if (msg.key.fromMe) continue;
+            
+            // Abaikan pesan grup
+            if (msg.key.remoteJid.endsWith('@g.us')) continue;
 
-        console.log(`Pesan masuk dari ${senderNumber}: ${text}`);
+            const sender = msg.key.remoteJid.replace('@s.whatsapp.net', '');
+            const messageContent = msg.message?.conversation || 
+                                   msg.message?.extendedTextMessage?.text || 
+                                   '';
 
-        // Cek data siswa di database simulasi
-        const dataSiswa = databaseSiswa[senderNumber];
+            if (!messageContent) continue;
 
-        // Routing perintah dasar
-        switch (text.toLowerCase()) {
-            case 'halo':
-                if (dataSiswa) {
-                    await sock.sendMessage(senderJid, { text: `Halo ${dataSiswa.nama}! Ada yang bisa bot bantu?` });
-                } else {
-                    await sock.sendMessage(senderJid, { text: 'Halo! Ada yang bisa bot bantu?' });
+            console.log(`Pesan masuk dari ${sender}: ${messageContent}`);
+
+            if (WEBHOOK_URL) {
+                try {
+                    // Meneruskan data ke Laravel dalam format payload Fonnte
+                    const botJid = sock.user && sock.user.id ? sock.user.id.split(':')[0] : '';
+                    await axios.post(WEBHOOK_URL, {
+                        sender: sender,
+                        message: messageContent,
+                        device: botJid
+                    });
+                } catch (error) {
+                    console.error('Gagal meneruskan pesan ke Webhook Laravel:', error.message);
                 }
-                break;
-
-            case '/izin':
-                if (dataSiswa) {
-                    await sock.sendMessage(senderJid, { 
-                        text: `Halo *${dataSiswa.nama}* dari kelas *${dataSiswa.kelas}*.\n\nData kamu sudah dikenali sistem. Silakan balas dengan alasan izin kamu hari ini:` 
-                    });
-                } else {
-                    await sock.sendMessage(senderJid, { 
-                        text: 'Nomor kamu belum terdaftar di database kami. Silakan kirimkan format manual:\nNama: \nKelas: \nAlasan:' 
-                    });
-                }
-                break;
-
-            case '/sakit':
-                if (dataSiswa) {
-                    await sock.sendMessage(senderJid, { 
-                        text: `Halo *${dataSiswa.nama}* (Kelas *${dataSiswa.kelas}*).\n\nSemoga lekas sembuh! Silakan kirimkan foto surat dokter untuk melengkapi keterangan sakit kamu.` 
-                    });
-                } else {
-                    await sock.sendMessage(senderJid, { 
-                        text: 'Nomor belum terdaftar. Silakan kirimkan format sakit manual beserta foto surat dokter.' 
-                    });
-                }
-                break;
-
-            case '/rekap':
-                await sock.sendMessage(senderJid, { text: 'Fitur rekap sedang dalam pengembangan.' });
-                break;
+            }
         }
     });
 }
 
-// ========================================================
-// 2. SETUP SERVER HTTP UNTUK RENDER.COM
-// ========================================================
+// Endpoint untuk mengirim pesan (dipanggil oleh Laravel)
+app.post('/send-message', async (req, res) => {
+    const authHeader = req.headers['authorization'];
+    if (authHeader !== API_KEY) {
+        return res.status(401).json({ status: false, message: 'Unauthorized' });
+    }
+
+    const { target, message } = req.body;
+    if (!target || !message) {
+        return res.status(400).json({ status: false, message: 'Missing target or message' });
+    }
+
+    try {
+        if (connectionStatus !== '✅ Terhubung! Bot WhatsApp siap digunakan.' || !sock) {
+            return res.status(503).json({ status: false, message: 'WhatsApp client is not connected' });
+        }
+
+        // Format nomor target ke format JID (contoh: 0812... -> 62812...@s.whatsapp.net)
+        let formattedNumber = target.replace(/[^0-9]/g, '');
+        if (formattedNumber.startsWith('0')) {
+            formattedNumber = '62' + formattedNumber.substr(1);
+        }
+        if (!formattedNumber.endsWith('@s.whatsapp.net')) {
+            formattedNumber = formattedNumber + '@s.whatsapp.net';
+        }
+
+        await sock.sendMessage(formattedNumber, { text: message });
+        console.log(`Pesan terkirim ke ${formattedNumber}: ${message}`);
+        res.json({ status: true, message: 'Message sent successfully' });
+    } catch (error) {
+        console.error('Gagal mengirim pesan:', error.message);
+        res.status(500).json({ status: false, message: error.message });
+    }
+});
+
+// Endpoint untuk status koneksi raw (opsional)
+app.get('/qr-code-raw', (req, res) => {
+    res.json({ 
+        qr: qrCodeImage, 
+        connected: connectionStatus === '✅ Terhubung! Bot WhatsApp siap digunakan.' 
+    });
+});
+
+// Tampilan Halaman Web Utama
 app.get('/', (req, res) => {
     let htmlContent = `
         <html>
         <head>
-            <title>WhatsApp Gateway</title>
+            <title>WhatsApp Gateway Status</title>
             <style>
-                body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
-                .status { font-size: 1.2em; font-weight: bold; margin-bottom: 20px; }
-                img { border: 2px solid #ddd; border-radius: 8px; padding: 10px; }
+                body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; background: #f4f7f6; color: #333; }
+                .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); display: inline-block; max-width: 500px; min-width: 320px; }
+                .status { font-size: 1.2em; font-weight: bold; margin-bottom: 20px; color: #25d366; }
+                img { border: 2px solid #ddd; border-radius: 8px; padding: 10px; background: white; margin-top: 10px; }
             </style>
-            <meta http-equiv="refresh" content="3">
+            <meta http-equiv="refresh" content="5">
         </head>
         <body>
-            <h1>WhatsApp Gateway Server</h1>
-            <div class="status">${connectionStatus}</div>
+            <div class="card">
+                <h1>WhatsApp Gateway (Baileys)</h1>
+                <div class="status">${connectionStatus}</div>
     `;
 
     if (qrCodeImage) {
-        htmlContent += `<img src="${qrCodeImage}" alt="QR Code WhatsApp" />`;
+        htmlContent += `
+            <p>Pindai QR Code di bawah dengan WhatsApp Anda (Perangkat Tertaut):</p>
+            <img src="${qrCodeImage}" alt="QR Code WhatsApp" />
+        `;
+    } else if (connectionStatus.includes('Terhubung')) {
+        htmlContent += `
+            <p style="color: #2e7d32;">🎉 WhatsApp Anda telah terhubung dan siap digunakan!</p>
+        `;
     }
 
     htmlContent += `
+            </div>
         </body>
         </html>
     `;
@@ -165,5 +190,5 @@ app.get('/', (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`Server web mendengarkan di port ${PORT}`);
-    connectToWhatsApp(); 
+    connectToWhatsApp();
 });
