@@ -79,14 +79,16 @@ async function connectToWhatsApp() {
             // Abaikan pesan grup
             if (msg.key.remoteJid.endsWith('@g.us')) continue;
 
-            const sender = msg.key.remoteJid.replace('@s.whatsapp.net', '');
+            // Gunakan senderPn (nomor HP asli) jika tersedia untuk mengatasi JID berformat @lid
+            const senderJid = msg.key.senderPn || msg.key.remoteJid;
+            const sender = senderJid.split('@')[0];
             const messageContent = msg.message?.conversation || 
                                    msg.message?.extendedTextMessage?.text || 
                                    '';
 
             if (!messageContent) continue;
 
-            console.log(`Pesan masuk dari ${sender}: ${messageContent}`);
+            console.log(`Pesan masuk dari ${sender} (JID Asli: ${msg.key.remoteJid}): ${messageContent}`);
 
             if (WEBHOOK_URL) {
                 try {
@@ -98,7 +100,8 @@ async function connectToWhatsApp() {
                         device: botJid
                     });
                 } catch (error) {
-                    console.error('Gagal meneruskan pesan ke Webhook Laravel:', error.message);
+                    const errorDetail = error.response ? `${error.response.status} - ${JSON.stringify(error.response.data)}` : error.message;
+                    console.error('Gagal meneruskan pesan ke Webhook Laravel:', errorDetail);
                 }
             }
         }
@@ -145,6 +148,33 @@ app.get('/qr-code-raw', (req, res) => {
     res.json({ 
         qr: qrCodeImage, 
         connected: connectionStatus === '✅ Terhubung! Bot WhatsApp siap digunakan.' 
+    });
+});
+
+// Endpoint untuk diagnosa koneksi webhook ke Laravel
+app.get('/debug-env', async (req, res) => {
+    let webhookStatus = 'Not Tested';
+    let webhookError = null;
+
+    if (WEBHOOK_URL) {
+        try {
+            // Test pinging the webhook URL with a POST request with empty body
+            await axios.post(WEBHOOK_URL, {}, { timeout: 3000 });
+            webhookStatus = 'Success (Pings OK)';
+        } catch (err) {
+            webhookStatus = `Failed`;
+            webhookError = err.response ? `${err.response.status} - ${JSON.stringify(err.response.data)}` : err.message;
+        }
+    } else {
+        webhookStatus = 'WEBHOOK_URL is not set';
+    }
+
+    res.json({
+        connectionStatus,
+        WEBHOOK_URL: WEBHOOK_URL || 'Not Defined',
+        API_KEY: API_KEY ? `${API_KEY.substring(0, 3)}***` : 'Not Defined',
+        webhookStatus,
+        webhookError
     });
 });
 
