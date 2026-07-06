@@ -100,8 +100,7 @@ async function connectToWhatsApp() {
                         device: botJid
                     });
                 } catch (error) {
-                    const errorDetail = error.response ? `${error.response.status} - ${JSON.stringify(error.response.data)}` : error.message;
-                    console.error('Gagal meneruskan pesan ke Webhook Laravel:', errorDetail);
+                    console.error('Gagal meneruskan pesan ke Webhook Laravel:', error);
                 }
             }
         }
