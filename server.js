@@ -1,59 +1,92 @@
 const { default: makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys');
-const qrcode = require('qrcode-terminal');
 const express = require('express');
+const qrcode = require('qrcode');
 
-// ========================================================
-// 1. SETUP SERVER HTTP UNTUK RENDER.COM
-// Render mewajibkan aplikasi mendengarkan suatu port
-// ========================================================
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.get('/', (req, res) => {
-    res.send('Bot WhatsApp berjalan dengan baik!');
-});
-
-app.listen(PORT, () => {
-    console.log(`Server web mendengarkan di port ${PORT}`);
-});
-
+// Variabel global untuk menyimpan status dan gambar QR
+let qrCodeImage = '';
+let connectionStatus = 'Menunggu inisialisasi WhatsApp...';
 
 // ========================================================
-// 2. LOGIKA BOT WHATSAPP
+// 1. LOGIKA BOT WHATSAPP
 // ========================================================
 async function connectToWhatsApp() {
-    // Menyimpan sesi login agar tidak perlu scan terus selama folder tidak terhapus
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
     const sock = makeWASocket({
         auth: state,
-        // Menyamar sebagai MacOS untuk menghindari blokir (Error 405) dari WhatsApp
+        // Menyamar sebagai MacOS untuk menghindari blokir WhatsApp
         browser: ['Mac OS', 'Desktop', '3.0'], 
-        // Mematikan QR bawaan karena sudah deprecated
-        printQRInTerminal: false 
+        printQRInTerminal: true // Tetap print di log Render sebagai cadangan
     });
 
-    sock.ev.on('connection.update', (update) => {
+    sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        // Print QR Code secara manual ke terminal (Logs di Render)
+        // Jika ada QR baru dari WhatsApp, ubah jadi gambar Base64
         if (qr) {
-            console.log('Silakan scan QR Code ini di aplikasi WhatsApp Anda:');
-            qrcode.generate(qr, { small: true });
+            try {
+                qrCodeImage = await qrcode.toDataURL(qr);
+                connectionStatus = 'Silakan scan QR Code untuk login.';
+                console.log('QR Code baru berhasil di-generate untuk Web.');
+            } catch (err) {
+                console.error('Gagal membuat gambar QR', err);
+            }
         }
 
         if (connection === 'close') {
-            console.log('Koneksi terputus. Mencoba menghubungkan kembali...');
-            // Panggil fungsi ini lagi untuk auto-reconnect
+            connectionStatus = 'Koneksi terputus. Mencoba menghubungkan kembali...';
+            qrCodeImage = ''; // Hapus QR lama
+            console.log(connectionStatus);
             connectToWhatsApp();
         } else if (connection === 'open') {
-            console.log('✅ Bot berhasil terhubung ke WhatsApp!');
+            connectionStatus = '✅ Terhubung! Bot WhatsApp siap digunakan.';
+            qrCodeImage = ''; // Hapus QR karena sudah login
+            console.log(connectionStatus);
         }
     });
 
-    // Simpan kredensial saat ada pembaruan sesi
     sock.ev.on('creds.update', saveCreds);
 }
 
-// Jalankan bot
-connectToWhatsApp();
+// ========================================================
+// 2. SETUP SERVER HTTP UNTUK RENDER.COM
+// ========================================================
+app.get('/', (req, res) => {
+    // Tampilan antarmuka HTML sederhana
+    let htmlContent = `
+        <html>
+        <head>
+            <title>WhatsApp Gateway</title>
+            <style>
+                body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }
+                .status { font-size: 1.2em; font-weight: bold; margin-bottom: 20px; }
+                img { border: 2px solid #ddd; border-radius: 8px; padding: 10px; }
+            </style>
+            <meta http-equiv="refresh" content="3">
+        </head>
+        <body>
+            <h1>WhatsApp Gateway Server</h1>
+            <div class="status">${connectionStatus}</div>
+    `;
+
+    // Jika ada gambar QR, tampilkan di web
+    if (qrCodeImage) {
+        htmlContent += `<img src="${qrCodeImage}" alt="QR Code WhatsApp" />`;
+    }
+
+    htmlContent += `
+        </body>
+        </html>
+    `;
+
+    res.send(htmlContent);
+});
+
+app.listen(PORT, () => {
+    console.log(`Server web mendengarkan di port ${PORT}`);
+    // Mulai koneksi WhatsApp setelah server jalan
+    connectToWhatsApp(); 
+});
