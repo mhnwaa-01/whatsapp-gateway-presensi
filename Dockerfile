@@ -1,25 +1,23 @@
-# Update this line
+# Menggunakan Node 20 agar Web Crypto API tersedia secara default
 FROM node:20-slim
 
-# Install git and ssh client for resolving git+ssh dependency URLs
-# Install git, ssh client, and ca-certificates for resolving git+ssh dependency URLs securely
+# Install git, ssh client, dan ca-certificates (untuk mencegah error SSL)
 RUN apt-get update && apt-get install -y git openssh-client ca-certificates --no-install-recommends && rm -rf /var/lib/apt/lists/*
 
 ENV HOME=/app
-
 WORKDIR /app
 
-# Set the environment variable to force Git to rewrite SSH/Git protocols to HTTPS for all subprocesses
+# Konfigurasi Git jika Anda menggunakan dependensi private (opsional, bawaan dari Anda)
 ENV GIT_CONFIG_PARAMETERS="'url.https://github.com/.insteadOf=ssh://git@github.com/' 'url.https://github.com/.insteadOf=git+ssh://git@github.com/' 'url.https://github.com/.insteadOf=git@github.com:'"
 
-# Salin HANYA package.json (bukan package-lock.json) untuk menghindari
-# penelusuran dependensi dev yang dikunci lewat Git SSH di lockfile lokal.
 COPY package.json ./
 
+# Install dependencies
 RUN npm install --omit=dev
 
 COPY . .
 
+# Expose port untuk Render.com
 EXPOSE 3000
 
 CMD ["npm", "start"]
