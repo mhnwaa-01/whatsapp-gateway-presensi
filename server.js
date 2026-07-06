@@ -112,6 +112,7 @@ async function connectToWhatsApp() {
 app.post('/send-message', async (req, res) => {
     const authHeader = req.headers['authorization'];
     if (authHeader !== API_KEY) {
+        console.warn(`[API] Peringatan: Akses ditolak untuk /send-message. Header Auth: "${authHeader}", Kunci yang diharapkan: "${API_KEY}"`);
         return res.status(401).json({ status: false, message: 'Unauthorized' });
     }
 
