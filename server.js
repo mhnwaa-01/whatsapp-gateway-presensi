@@ -1,13 +1,22 @@
 const { default: makeWASocket, useMultiFileAuthState, fetchLatestWaWebVersion, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
 const qrcode = require('qrcode');
-const pino = require('pino'); // Tambahkan pino untuk mengatur log
+const pino = require('pino'); 
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 let qrCodeImage = '';
 let connectionStatus = 'Menunggu inisialisasi WhatsApp...';
+
+// ========================================================
+// DATABASE SIMULASI (Ganti dengan kueri MySQL/MongoDB milikmu nanti)
+// ========================================================
+const databaseSiswa = {
+    // Kunci menggunakan format nomor WA internasional tanpa '+'
+    "6281776800015": { nama: "Siswa Penguji", kelas: "12 RPL 1" },
+    "6281234567890": { nama: "Budi Santoso", kelas: "11 TKJ 2" }
+};
 
 // ========================================================
 // 1. LOGIKA BOT WHATSAPP
@@ -24,7 +33,6 @@ async function connectToWhatsApp() {
         auth: state,
         browser: ['Mac OS', 'Desktop', '3.0'], 
         printQRInTerminal: true,
-        // Gunakan logger silent agar terminal tidak dibanjiri log sinkronisasi
         logger: pino({ level: 'silent' }) 
     });
 
@@ -44,21 +52,16 @@ async function connectToWhatsApp() {
 
         if (connection === 'close') {
             qrCodeImage = ''; 
-            
-            // Cek apakah alasan disconnect karena logout (sesi tidak valid)
             const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-            
             console.log('Koneksi terputus. Alasan:', lastDisconnect.error?.message);
             
             if (shouldReconnect) {
                 connectionStatus = 'Koneksi terputus. Mencoba menghubungkan kembali...';
                 console.log(connectionStatus);
-                connectToWhatsApp(); // Reconnect otomatis
+                connectToWhatsApp(); 
             } else {
                 connectionStatus = 'Sesi Invalid / Logout. Silakan hapus folder auth_info_baileys dan scan ulang.';
                 console.log(connectionStatus);
-                // Jika masuk ke sini, JANGAN panggil connectToWhatsApp(). 
-                // Kamu harus hapus folder auth secara manual.
             }
         } else if (connection === 'open') {
             connectionStatus = '✅ Terhubung! Bot WhatsApp siap digunakan.';
@@ -70,32 +73,59 @@ async function connectToWhatsApp() {
     // EVENT: UPDATE KREDENSIAL
     sock.ev.on('creds.update', saveCreds);
 
-    // EVENT: PESAN MASUK (Ini yang sebelumnya kurang!)
+    // EVENT: PESAN MASUK (Sudah di-update dengan logika pengenalan nomor HP)
     sock.ev.on('messages.upsert', async (m) => {
         const msg = m.messages[0];
         
-        // Abaikan pesan dari bot itu sendiri atau pesan kosong
         if (!msg.message || msg.key.fromMe) return;
 
-        // Ambil isi teks dari pesan
         const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
-        const sender = msg.key.remoteJid;
+        const senderJid = msg.key.remoteJid; 
+        
+        // Ekstrak hanya nomor HP tanpa '@s.whatsapp.net'
+        const senderNumber = senderJid.split('@')[0]; 
 
-        console.log(`Pesan masuk dari ${sender}: ${text}`);
+        console.log(`Pesan masuk dari ${senderNumber}: ${text}`);
+
+        // Cek data siswa di database simulasi
+        const dataSiswa = databaseSiswa[senderNumber];
 
         // Routing perintah dasar
         switch (text.toLowerCase()) {
             case 'halo':
-                await sock.sendMessage(sender, { text: 'Halo! Ada yang bisa bot bantu?' });
+                if (dataSiswa) {
+                    await sock.sendMessage(senderJid, { text: `Halo ${dataSiswa.nama}! Ada yang bisa bot bantu?` });
+                } else {
+                    await sock.sendMessage(senderJid, { text: 'Halo! Ada yang bisa bot bantu?' });
+                }
                 break;
+
             case '/izin':
-                await sock.sendMessage(sender, { text: 'Silakan kirimkan format izin:\nNama: \nKelas: \nAlasan:' });
+                if (dataSiswa) {
+                    await sock.sendMessage(senderJid, { 
+                        text: `Halo *${dataSiswa.nama}* dari kelas *${dataSiswa.kelas}*.\n\nData kamu sudah dikenali sistem. Silakan balas dengan alasan izin kamu hari ini:` 
+                    });
+                } else {
+                    await sock.sendMessage(senderJid, { 
+                        text: 'Nomor kamu belum terdaftar di database kami. Silakan kirimkan format manual:\nNama: \nKelas: \nAlasan:' 
+                    });
+                }
                 break;
+
             case '/sakit':
-                await sock.sendMessage(sender, { text: 'Silakan kirimkan format sakit dan lampirkan foto surat dokter jika ada.' });
+                if (dataSiswa) {
+                    await sock.sendMessage(senderJid, { 
+                        text: `Halo *${dataSiswa.nama}* (Kelas *${dataSiswa.kelas}*).\n\nSemoga lekas sembuh! Silakan kirimkan foto surat dokter untuk melengkapi keterangan sakit kamu.` 
+                    });
+                } else {
+                    await sock.sendMessage(senderJid, { 
+                        text: 'Nomor belum terdaftar. Silakan kirimkan format sakit manual beserta foto surat dokter.' 
+                    });
+                }
                 break;
+
             case '/rekap':
-                await sock.sendMessage(sender, { text: 'Fitur rekap sedang dalam pengembangan.' });
+                await sock.sendMessage(senderJid, { text: 'Fitur rekap sedang dalam pengembangan.' });
                 break;
         }
     });
