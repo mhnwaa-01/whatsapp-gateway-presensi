@@ -1,4 +1,5 @@
-FROM node:18-slim
+# Update this line
+FROM node:20-slim
 
 # Install git and ssh client for resolving git+ssh dependency URLs
 # Install git, ssh client, and ca-certificates for resolving git+ssh dependency URLs securely
