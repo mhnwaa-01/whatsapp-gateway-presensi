@@ -5,13 +5,13 @@ RUN apt-get update && apt-get install -y git openssh-client --no-install-recomme
 
 ENV HOME=/app
 
+WORKDIR /app
+
 # Configure git to use HTTPS instead of SSH for all git and ssh URLs (avoids SSH key requirements)
 RUN git config --global url."https://github.com/".insteadOf "ssh://git@github.com/" && \
     git config --global url."https://github.com/".insteadOf "git@github.com:" && \
     git config --global url."https://".insteadOf "ssh://" && \
     git config --global url."https://".insteadOf "git+ssh://"
-
-WORKDIR /app
 
 COPY package*.json ./
 
